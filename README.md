@@ -42,28 +42,105 @@ CLAUDE_MANAGED_ENVIRONMENT_ID=your_environment_id
 PORT=3028
 ```
 
-## How the application was developed
+## How the app was build
 
-The browser collects inputs; the Node host validates requests; the lesson implementation produces observable evidence. The architecture page walks through the real source with numbered steps, prerequisite configuration, source filenames and code excerpts.
+### 1. Check expiry and supported consent actions
 
-### Lesson implementation
+An expired form is rejected before any transport claim. The student must select accept, decline or cancel; arbitrary actions are not supported.
 
-[src/lesson.ts](https://github.com/luiscoco/Udemy-claude-managed-agents-lesson-c28-app/blob/main/src/lesson.ts)
+Source: [src/lesson.ts](src/lesson.ts#L13) · selected statements
 
 ```typescript
-  async run(input) {
+if (flag(input, "expired"))
+  return report(
+    "rejected",
+    "The form expired and needs deliberate cleanup",
+    { state: "expired" },
+    ["Check expiry before a transport claim"],
+  );
 
-if(flag(input,"expired"))return report("rejected","The form expired and needs deliberate cleanup",{state:"expired"},["Check expiry before a transport claim"]);
-const action=text(input,"action");if(!["accept","decline","cancel"].includes(action))throw new Error("Unsupported form action");
-const quantity=number(input,"quantity"),date=text(input,"date");
-if(action==="accept"&&(!/^\d{4}-\d{2}-\d{2}$/.test(date)||Number.isNaN(Date.parse(date))||!Number.isInteger(quantity)||quantity<1||quantity>100))return report("paused","Validation failed; keep the form pending",{state:"pending"},["Validate nonsecret form data before claiming"]);
-return report("passed","Prepared the correlated MCP form reply",{state:"answered",mcpReply:{jsonrpc:"2.0",id:17,result:{action,...(action==="accept"?{content:{date,quantity}}:{})}},managedCustomCall:"still requires its own result"},["Verify consent and owner binding","Claim the pending form","Use the MCP request ID, not the managed event ID"]);
+const action = text(input, "action");
 
-  }
-};
+if (!["accept", "decline", "cancel"].includes(action))
+  throw new Error("Unsupported form action");
 ```
 
-Read the architecture page for the remaining source excerpts and explanations, including input handling and optional provider behavior. The diagram describes this application, rather than implying that an external integration has been implemented.
+### 2. Validate accepted form data before claiming
+
+Acceptance requires a parseable date with the expected shape and a bounded integer quantity. Failed validation keeps the form pending so the user can correct it.
+
+Source: [src/lesson.ts](src/lesson.ts#L15) · selected statements
+
+```typescript
+const quantity = number(input, "quantity"),
+  date = text(input, "date");
+
+if (
+  action === "accept" &&
+  (!/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+    Number.isNaN(Date.parse(date)) ||
+    !Number.isInteger(quantity) ||
+    quantity < 1 ||
+    quantity > 100)
+)
+  return report(
+    "paused",
+    "Validation failed; keep the form pending",
+    { state: "pending" },
+    ["Validate nonsecret form data before claiming"],
+  );
+```
+
+### 3. Use the MCP request ID in the reply
+
+The JSON-RPC result uses the seeded MCP id 17. A managed custom call would still need its own correlated result; these two identifier domains are not interchangeable.
+
+Source: [src/lesson.ts](src/lesson.ts#L17)
+
+```typescript
+return report(
+  "passed",
+  "Prepared the correlated MCP form reply",
+  {
+    state: "answered",
+    mcpReply: {
+      jsonrpc: "2.0",
+      id: 17,
+      result: {
+        action,
+        ...(action === "accept" ? { content: { date, quantity } } : {}),
+      },
+    },
+    managedCustomCall: "still requires its own result",
+  },
+  [
+    "Verify consent and owner binding",
+    "Claim the pending form",
+    "Use the MCP request ID, not the managed event ID",
+  ],
+);
+```
+
+### Check your understanding
+
+Run **Accept a valid field note** in the application. Compare the result with these scenario expectations:
+
+```json
+{
+  "input": {
+    "date": "2026-10-22",
+    "quantity": 4,
+    "action": "accept",
+    "expired": false
+  },
+  "expectedOutcome": "passed",
+  "checkEvidence": {
+    "state": "answered"
+  }
+}
+```
+
+Then try **Keep an invalid form pending**. Its expected outcome is `paused`; identify the condition or evidence field that explains the difference.
 
 ## Validation
 
