@@ -1,0 +1,46 @@
+import { z } from "zod";
+export const FieldNoteForm = z.strictObject({ date: z.iso.date(), quantity: z.number().int().min(1).max(100) });
+const Answer = z.discriminatedUnion("action", [
+  z.strictObject({ runId: z.string(), action: z.literal("accept"), content: FieldNoteForm }),
+  z.strictObject({ runId: z.string(), action: z.literal("decline") }),
+  z.strictObject({ runId: z.string(), action: z.literal("cancel") })
+]);
+export type Pending = { ownerId: string; runId: string; serverId: string; transportId: string;
+  mcpRequestId: string | number; sevtId: string; consentId: string; expiresAt: number;
+  state: "pending" | "sending" | "answered" | "uncertain" | "expired" };
+type Reply = { jsonrpc: "2.0"; id: string | number; result: { action: "accept" | "decline" | "cancel"; content?: z.infer<typeof FieldNoteForm> } };
+export async function answerElicitation(p: Pending, authenticatedOwnerId: string, consentId: string,
+  body: unknown, now: number, send: (transportId: string, reply: Reply) => Promise<void>) {
+  if (!authenticatedOwnerId || authenticatedOwnerId !== p.ownerId) throw new Error("Foreign owner");
+  if (consentId !== p.consentId) throw new Error("Consent mismatch");
+  if (p.state !== "pending") throw new Error("Request already claimed or closed");
+  if (now >= p.expiresAt) { p.state = "expired"; throw new Error("Form expired"); }
+  const parsed = Answer.safeParse(body);
+  if (!parsed.success) return { status: "pending" as const, errors: parsed.error.issues };
+  if (parsed.data.runId !== p.runId) throw new Error("Run mismatch");
+  const data = parsed.data;
+  const reply: Reply = { jsonrpc: "2.0", id: p.mcpRequestId, result: data.action === "accept"
+    ? { action: "accept", content: data.content } : { action: data.action } };
+  p.state = "sending"; // claim BEFORE asynchronous transport work
+  try { await send(p.transportId, reply); p.state = "answered"; return { status: "answered" as const }; }
+  catch { p.state = "uncertain"; return { status: "uncertain" as const }; }
+}
+const ResourceRequest = z.strictObject({ uri: z.string().max(512), version: z.string().max(128) });
+export async function readApprovedResource(input: unknown, context: { ownerId: string; consent: boolean },
+  registry: ReadonlyMap<string, { ownerId: string; version: string; maxBytes: number }>, read: (uri: string) => Promise<string>) {
+  const request = ResourceRequest.parse(input); const entry = registry.get(request.uri);
+  if (!context.consent || !context.ownerId || !entry || entry.ownerId !== context.ownerId || entry.version !== request.version)
+    throw new Error("Resource not authorized");
+  const text = await read(request.uri);
+  if (Buffer.byteLength(text, "utf8") > entry.maxBytes) throw new Error("Resource result too large");
+  return { uri: request.uri, version: entry.version, text };
+}
+// ownerId, registry, consent and transport binding are trusted host state, not browser assertions.
+// Generate unguessable consent IDs server-side and persist claims/results for crash recovery.
+// The MCP request ID routes the form response. sevtId routes the later user.custom_tool_result;
+// accepting the form does NOT itself complete the Managed custom-tool call.
+// Invalid forms stay pending. Decline/cancel are distinct. Expiry needs transport cleanup AND a
+// deliberate custom-tool error result or remote interruption policy; do not leave the agent blocked.
+// This is form-mode for nonsecret data. Do not request passwords/API keys in form elicitation.
+// Resource version is a host registry policy, not an invented resources/read protocol parameter.
+// read transport should bound response bytes while receiving; this final check bounds returned content.
